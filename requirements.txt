@@ -3,6 +3,18 @@ uvicorn[standard]==0.30.6
 pyyaml==6.0.2
 pydantic==2.9.2
 pydantic-settings==2.5.2
-FlagEmbedding==1.2.11
 numpy>=1.24.0
-# torch 由基础镜像提供
+
+# === ML 核心依赖（先锁定版本，再装 FlagEmbedding 避免被覆盖）===
+transformers==4.44.2
+sentence-transformers==3.1.1
+accelerate==0.33.0
+peft>=0.11.0
+datasets>=2.19.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+
+# FlagEmbedding 放最后，它的依赖已被上面锁定
+FlagEmbedding==1.2.11
+
+# torch 由基础镜像 pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime 提供

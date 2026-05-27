@@ -19,12 +19,8 @@ logger = logging.getLogger(__name__)
 class BatchItem:
     """队列中的单个请求"""
     data: Any
-    future: asyncio.Future = field(init=False)
+    future: asyncio.Future = field(default=None)
     enqueue_time: float = field(default_factory=time.monotonic)
-
-    def __post_init__(self):
-        # future 由 submit() 方法显式设置，这里仅占位
-        pass
 
 
 class DynamicBatcher:

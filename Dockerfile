@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖（torch 已预装）
+# Python 依赖（torch 已由基础镜像提供，pip 安装时跳过）
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

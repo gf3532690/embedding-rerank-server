@@ -1,11 +1,12 @@
 # Embedding & Rerank Server 打包脚本（AMD64 + GPU）
+# 本地构建镜像并导出，用于离线部署到无外网的 GPU 服务器
 $ErrorActionPreference = "Stop"
 $OUT = "deploy"
 
 Write-Host "=== Embedding & Rerank Server 打包 ===" -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
-# 构建镜像
+# 构建镜像（利用缓存，仅依赖变更时重装）
 Write-Host "`n[1] 构建服务镜像..." -ForegroundColor Cyan
 docker build -t embedding-rerank-server:latest .
 if ($LASTEXITCODE -ne 0) { Write-Host "构建失败！" -ForegroundColor Red; exit 1 }
@@ -24,12 +25,9 @@ $size = [math]::Round((Get-ChildItem -Recurse $OUT | Measure-Object -Property Le
 Write-Host "输出: $OUT\ ($size GB)"
 Write-Host ""
 Write-Host "部署步骤:" -ForegroundColor Yellow
-Write-Host "  1. scp deploy/* user@gpu-server:/opt/embedding-rerank-server/"
+Write-Host "  1. scp deploy/* user@gpu-server:/weique/jmarag/embedding-rerank-server/"
 Write-Host "  2. ssh gpu-server"
-Write-Host "  3. docker load -i embedding-rerank-server.tar"
-Write-Host "  4. 编辑 config.yaml 确认模型路径"
-Write-Host "  5. docker compose up -d"
-Write-Host ""
-Write-Host "ARM 服务器 aladdin .env 配置:" -ForegroundColor Yellow
-Write-Host "  EMBED_BASE_URL=http://<gpu-server-ip>:7997/v1"
-Write-Host "  RERANK_BASE_URL=http://<gpu-server-ip>:7998/v1"
+Write-Host "  3. cd /weique/jmarag/embedding-rerank-server"
+Write-Host "  4. docker load -i embedding-rerank-server.tar"
+Write-Host "  5. rm embedding-rerank-server.tar"
+Write-Host "  6. docker compose up -d"
