@@ -1,0 +1,61 @@
+# Embedding & Rerank Server 部署配置
+# 两个独立进程，共享同一镜像，各自加载不同模型
+
+services:
+  embedding:
+    container_name: ers-embedding
+    image: embedding-rerank-server:latest
+    environment:
+      - MODE=embed
+      - EMBED_MODEL_PATH=/models/bge-m3
+      - DEVICE=cuda
+      - MAX_BATCH_SIZE=64
+      - MAX_WAIT_MS=10
+      - PORT=7997
+    ports:
+      - "7997:7997"
+    volumes:
+      - ${MODEL_DIR:-./models}:/models:ro
+      - ./config.yaml:/app/config.yaml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+  reranker:
+    container_name: ers-reranker
+    image: embedding-rerank-server:latest
+    environment:
+      - MODE=rerank
+      - RERANK_MODEL_PATH=/models/bge-reranker-v2-m3
+      - DEVICE=cuda
+      - PORT=7998
+    ports:
+      - "7998:7998"
+    volumes:
+      - ${MODEL_DIR:-./models}:/models:ro
+      - ./config.yaml:/app/config.yaml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7998/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped

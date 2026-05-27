@@ -1,0 +1,39 @@
+# ============================================================
+# Embedding & Rerank Server 配置
+# ============================================================
+
+server:
+  host: "0.0.0.0"
+  port: 7997
+  workers: 1  # GPU 模式建议 1，避免显存冲突
+
+# 运行模式：embed / rerank / all
+mode: "all"
+
+# ===== 模型配置 =====
+models:
+  embed:
+    path: "/models/bge-m3"
+    device: "cuda"
+    fp16: true
+    # 最大输入 token 长度（超出截断）
+    max_length: 8192
+
+  rerank:
+    path: "/models/bge-reranker-v2-m3"
+    device: "cuda"
+    fp16: true
+    max_length: 512
+
+# ===== Dynamic Batching 配置 =====
+batching:
+  # 最大 batch 大小（凑够立即发，不等超时）
+  max_batch_size: 64
+  # 最大等待时间（毫秒），未凑够 batch 时到时间也发
+  max_wait_ms: 10
+
+# ===== 预热 =====
+warmup:
+  enabled: true
+  # 预热时发送的 dummy 文本数量
+  samples: 8
