@@ -15,6 +15,8 @@ class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 7997
     workers: int = 1
+    # 单请求最大超时时间（秒）
+    request_timeout: int = 120
 
 
 class EmbedModelConfig(BaseModel):
@@ -22,6 +24,8 @@ class EmbedModelConfig(BaseModel):
     device: str = "cuda"
     fp16: bool = True
     max_length: int = 8192
+    # 推理引擎：pytorch（GPU 推荐）/ onnx（CPU 推荐）
+    engine: str = "pytorch"
 
 
 class RerankModelConfig(BaseModel):
@@ -29,6 +33,7 @@ class RerankModelConfig(BaseModel):
     device: str = "cuda"
     fp16: bool = True
     max_length: int = 512
+    engine: str = "pytorch"
 
 
 class ModelsConfig(BaseModel):
@@ -95,5 +100,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         config.batching.max_wait_ms = int(os.environ["MAX_WAIT_MS"])
     if os.environ.get("MAX_CONCURRENCY"):
         config.batching.max_concurrency = int(os.environ["MAX_CONCURRENCY"])
+    if os.environ.get("REQUEST_TIMEOUT"):
+        config.server.request_timeout = int(os.environ["REQUEST_TIMEOUT"])
 
     return config

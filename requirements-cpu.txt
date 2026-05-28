@@ -1,5 +1,3 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pyyaml==6.0.2
@@ -15,7 +13,11 @@ peft>=0.11.0
 datasets>=2.19.0
 sentencepiece>=0.1.99
 protobuf>=3.20.0
-torch==2.5.1+cpu
+torch==2.5.1
 
-# FlagEmbedding 放最后
+# ONNX Runtime（CPU 推理加速）
+onnxruntime>=1.18.0
+optimum[onnxruntime]>=1.19.0
+
+# FlagEmbedding（用于 sparse 向量 + pytorch 模式回退）
 FlagEmbedding==1.2.11

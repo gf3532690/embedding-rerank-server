@@ -8,7 +8,7 @@ New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
 # 构建镜像
 Write-Host "`n[1] 构建 CPU 镜像..." -ForegroundColor Cyan
-docker build -f Dockerfile.cpu -t embedding-rerank-server:cpu .
+docker build --platform linux/arm64 -f Dockerfile.cpu -t embedding-rerank-server:cpu .
 if ($LASTEXITCODE -ne 0) { Write-Host "构建失败！" -ForegroundColor Red; exit 1 }
 
 # 导出镜像

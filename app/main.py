@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
             device=config.models.embed.device,
             fp16=config.models.embed.fp16,
             max_length=config.models.embed.max_length,
+            engine=config.models.embed.engine,
         )
         embed_model.load()
 
@@ -109,6 +110,7 @@ async def lifespan(app: FastAPI):
             device=config.models.rerank.device,
             fp16=config.models.rerank.fp16,
             max_length=config.models.rerank.max_length,
+            engine=config.models.rerank.engine,
         )
         rerank_model.load()
 
@@ -184,8 +186,11 @@ async def create_embeddings(request: EmbeddingRequest):
 
     # 通过 batcher 提交（每个文本作为独立请求进入队列）
     # 但这里一次请求可能包含多条文本，直接作为一个 batch 提交更高效
-    futures = [dense_batcher.submit(text) for text in texts]
-    embeddings = await asyncio.gather(*futures)
+    try:
+        futures = [dense_batcher.submit(text) for text in texts]
+        embeddings = await asyncio.wait_for(asyncio.gather(*futures), timeout=config.server.request_timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Embedding request timeout ({config.server.request_timeout}s)")
 
     data = [
         EmbeddingData(embedding=emb, index=i)
@@ -214,8 +219,11 @@ async def create_sparse_embeddings(request: SparseEmbeddingRequest):
     if not texts:
         raise HTTPException(status_code=400, detail="Inputs cannot be empty")
 
-    futures = [sparse_batcher.submit(text) for text in texts]
-    sparse_vecs = await asyncio.gather(*futures)
+    try:
+        futures = [sparse_batcher.submit(text) for text in texts]
+        sparse_vecs = await asyncio.wait_for(asyncio.gather(*futures), timeout=config.server.request_timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Sparse embedding request timeout ({config.server.request_timeout}s)")
 
     return sparse_vecs
 
