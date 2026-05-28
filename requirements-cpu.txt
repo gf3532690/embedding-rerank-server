@@ -16,8 +16,8 @@ protobuf>=3.20.0
 torch==2.5.1
 
 # ONNX Runtime（CPU 推理加速）
-onnxruntime>=1.18.0
-optimum[onnxruntime]>=1.19.0
+onnxruntime==1.19.2
+optimum==1.22.0
 
 # FlagEmbedding（用于 sparse 向量 + pytorch 模式回退）
 FlagEmbedding==1.2.11

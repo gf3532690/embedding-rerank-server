@@ -15,12 +15,14 @@ models:
     device: "cpu"
     fp16: false
     max_length: 1024
+    engine: "onnx"
 
   rerank:
     path: "/models/bge-reranker-v2-m3"
     device: "cpu"
     fp16: false
     max_length: 512
+    engine: "pytorch"
 
 batching:
   max_batch_size: 16
