@@ -68,7 +68,7 @@ class EmbedModel:
         sorted_texts = [t for _, t in indexed_texts]
         output = self._model.encode(
             sorted_texts,
-            batch_size=len(sorted_texts),
+            batch_size=min(len(sorted_texts), 32),
             max_length=self.max_length,
             return_dense=True,
             return_sparse=False,
@@ -100,7 +100,7 @@ class EmbedModel:
 
         output = self._model.encode(
             texts,
-            batch_size=len(texts),
+            batch_size=min(len(texts), 32),
             max_length=self.max_length,
             return_dense=False,
             return_sparse=True,

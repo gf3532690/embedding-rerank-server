@@ -44,26 +44,33 @@ embed_model: EmbedModel = None
 rerank_model: RerankModel = None
 dense_batcher: DynamicBatcher = None
 sparse_batcher: DynamicBatcher = None
+# GPU 推理信号量：控制同时执行的推理任务数，避免显存叠加 OOM
+# max_concurrency=1 串行，>1 允许并行（显存充足时可提高吞吐）
+_gpu_semaphore: asyncio.Semaphore = None
 
 
 async def _batch_dense(texts: list[str]) -> list[list[float]]:
     """Dense embedding 批量推理（在线程池中执行避免阻塞事件循环）"""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, embed_model.encode_dense, texts)
+    async with _gpu_semaphore:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, embed_model.encode_dense, texts)
 
 
 async def _batch_sparse(texts: list[str]) -> list[list[dict]]:
     """Sparse embedding 批量推理"""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, embed_model.encode_sparse, texts)
+    async with _gpu_semaphore:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, embed_model.encode_sparse, texts)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时加载模型，关闭时释放资源"""
-    global config, embed_model, rerank_model, dense_batcher, sparse_batcher
+    global config, embed_model, rerank_model, dense_batcher, sparse_batcher, _gpu_semaphore
 
+    _gpu_semaphore = asyncio.Semaphore(1)  # 默认值，下面会被配置覆盖
     config = load_config()
+    _gpu_semaphore = asyncio.Semaphore(config.batching.max_concurrency)
     logger.info("Server mode: %s", config.mode)
     logger.info("Batching config: max_batch_size=%d, max_wait_ms=%d",
                 config.batching.max_batch_size, config.batching.max_wait_ms)

@@ -39,6 +39,8 @@ class ModelsConfig(BaseModel):
 class BatchingConfig(BaseModel):
     max_batch_size: int = 64
     max_wait_ms: int = 10
+    # GPU 推理并发数：1 表示串行（显存紧张时用），>1 允许并行推理
+    max_concurrency: int = 1
 
 
 class WarmupConfig(BaseModel):
@@ -91,5 +93,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         config.batching.max_batch_size = int(os.environ["MAX_BATCH_SIZE"])
     if os.environ.get("MAX_WAIT_MS"):
         config.batching.max_wait_ms = int(os.environ["MAX_WAIT_MS"])
+    if os.environ.get("MAX_CONCURRENCY"):
+        config.batching.max_concurrency = int(os.environ["MAX_CONCURRENCY"])
 
     return config

@@ -31,8 +31,6 @@ batching:
   max_batch_size: 64
   # 最大等待时间（毫秒），未凑够 batch 时到时间也发
   max_wait_ms: 10
-  # GPU 推理并发数：1=串行（显存紧张），2+=并行（显存充足时提高吞吐）
-  max_concurrency: 1
 
 # ===== 预热 =====
 warmup:

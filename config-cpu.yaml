@@ -1,0 +1,33 @@
+# ============================================================
+# Embedding & Rerank Server 配置（CPU 模式）
+# ============================================================
+
+server:
+  host: "0.0.0.0"
+  port: 7997
+  workers: 1
+
+mode: "all"
+
+models:
+  embed:
+    path: "/models/bge-m3"
+    device: "cpu"
+    fp16: false
+    max_length: 1024
+
+  rerank:
+    path: "/models/bge-reranker-v2-m3"
+    device: "cpu"
+    fp16: false
+    max_length: 512
+
+batching:
+  max_batch_size: 16
+  max_wait_ms: 50
+  # CPU 模式不存在显存问题，可以并行
+  max_concurrency: 2
+
+warmup:
+  enabled: true
+  samples: 4

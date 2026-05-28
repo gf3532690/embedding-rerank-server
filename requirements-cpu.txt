@@ -1,0 +1,21 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pyyaml==6.0.2
+pydantic==2.9.2
+pydantic-settings==2.5.2
+numpy>=1.24.0
+
+# === ML 核心依赖 ===
+transformers==4.44.2
+sentence-transformers==3.1.1
+accelerate==0.33.0
+peft>=0.11.0
+datasets>=2.19.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+torch==2.5.1+cpu
+
+# FlagEmbedding 放最后
+FlagEmbedding==1.2.11

@@ -12,8 +12,6 @@ services:
       - MAX_BATCH_SIZE=64
       - MAX_WAIT_MS=10
       - PORT=7997
-      - NVIDIA_VISIBLE_DEVICES=1
-      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "7997:7997"
     volumes:
@@ -24,7 +22,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              count: 1
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
@@ -42,8 +40,6 @@ services:
       - RERANK_MODEL_PATH=/models/bge-reranker-v2-m3
       - DEVICE=cuda
       - PORT=7998
-      - NVIDIA_VISIBLE_DEVICES=1
-      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "7998:7998"
     volumes:
@@ -54,7 +50,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              count: 1
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7998/health"]
