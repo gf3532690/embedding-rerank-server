@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements-cpu.txt
 
 # 应用代码
 COPY app/ ./app/
-COPY config-cpu.yaml ./config.yaml
+COPY config.yaml .
 
 # 健康检查
 HEALTHCHECK --interval=15s --timeout=10s --retries=5 --start-period=60s \

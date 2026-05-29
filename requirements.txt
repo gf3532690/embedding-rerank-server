@@ -2,7 +2,6 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pyyaml==6.0.2
 pydantic==2.9.2
-pydantic-settings==2.5.2
 numpy>=1.24.0
 
 # === ML 核心依赖（先锁定版本，再装 FlagEmbedding 避免被覆盖）===
@@ -16,5 +15,8 @@ protobuf>=3.20.0
 
 # FlagEmbedding 放最后，它的依赖已被上面锁定
 FlagEmbedding==1.2.11
+
+# Prometheus 监控
+prometheus_client>=0.20.0
 
 # torch 由基础镜像 pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime 提供

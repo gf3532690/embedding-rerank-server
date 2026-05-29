@@ -1,6 +1,8 @@
 # ============================================================
-# Embedding & Rerank Server 配置
+# Embedding & Rerank Server 配置（v2.0 自适应引擎）
 # ============================================================
+# 所有性能参数默认 "auto"，启动时自动探测硬件并填充最优值。
+# 手动指定的值会覆盖自动探测结果。
 
 server:
   host: "0.0.0.0"
@@ -14,25 +16,35 @@ mode: "all"
 models:
   embed:
     path: "/models/bge-m3"
-    device: "cuda"
-    fp16: true
+    # device: auto → 有 GPU 用 cuda，无 GPU 用 cpu
+    device: "auto"
+    # fp16: auto → GPU 开启，CPU 关闭
+    fp16: "auto"
     # 最大输入 token 长度（超出截断）
     max_length: 8192
+    # engine: auto → GPU 用 pytorch，CPU 用 onnx
+    engine: "auto"
 
   rerank:
     path: "/models/bge-reranker-v2-m3"
-    device: "cuda"
-    fp16: true
+    device: "auto"
+    fp16: "auto"
     max_length: 512
+    engine: "auto"
 
-# ===== Dynamic Batching 配置 =====
+# ===== Token-level Batching 配置 =====
 batching:
-  # 最大 batch 大小（凑够立即发，不等超时）
-  max_batch_size: 64
+  # 每批最大条数：auto → 根据显存/核数自动决定
+  max_batch_size: "auto"
+  # 每批最大总 token 数：auto → 根据显存估算
+  max_batch_tokens: "auto"
   # 最大等待时间（毫秒），未凑够 batch 时到时间也发
   max_wait_ms: 10
-  # GPU 推理并发数：1=串行（显存紧张），2+=并行（显存充足时提高吞吐）
-  max_concurrency: 1
+  # 推理并发数：auto → GPU=1（串行），CPU=核数/2
+  max_concurrency: "auto"
+  # 背压阈值：auto → max_batch_size × 50
+  # 队列深度超过此值返回 HTTP 429
+  backpressure_threshold: "auto"
 
 # ===== 预热 =====
 warmup:

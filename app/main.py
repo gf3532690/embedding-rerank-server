@@ -1,10 +1,18 @@
 """Embedding & Rerank Server 入口
 
-基于 FlagEmbedding 的模型推理服务，提供：
+基于 FlagEmbedding 的自适应推理服务，提供：
 - /v1/embeddings — OpenAI 兼容 dense embedding
 - /v1/embed_sparse — sparse embedding (lexical weights)
 - /v1/rerank — 文档重排序
-- /health — 模型就绪状态检查
+- /health — 模型就绪状态 + 队列深度 + 预估等待时间
+- /metrics — Prometheus 监控端点
+
+核心特性：
+- 自动硬件探测，零配置启动
+- Token-level continuous batching
+- 优先级队列（查询优先于入库）
+- 背压机制（队列过深返回 429）
+- 无超时，永不主动拒绝请求
 """
 
 import asyncio
@@ -12,11 +20,13 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app.batcher import DynamicBatcher
+from app.batcher import BackpressureError, TokenBatcher
 from app.config import AppConfig, load_config
+from app.hardware import auto_configure
 from app.models import EmbedModel, RerankModel
 from app.schemas import (
     EmbeddingData,
@@ -42,10 +52,9 @@ logger = logging.getLogger(__name__)
 config: AppConfig = None
 embed_model: EmbedModel = None
 rerank_model: RerankModel = None
-dense_batcher: DynamicBatcher = None
-sparse_batcher: DynamicBatcher = None
+dense_batcher: TokenBatcher = None
+sparse_batcher: TokenBatcher = None
 # GPU 推理信号量：控制同时执行的推理任务数，避免显存叠加 OOM
-# max_concurrency=1 串行，>1 允许并行（显存充足时可提高吞吐）
 _gpu_semaphore: asyncio.Semaphore = None
 
 
@@ -68,12 +77,22 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时加载模型，关闭时释放资源"""
     global config, embed_model, rerank_model, dense_batcher, sparse_batcher, _gpu_semaphore
 
-    _gpu_semaphore = asyncio.Semaphore(1)  # 默认值，下面会被配置覆盖
+    # 加载配置
     config = load_config()
+
+    # 自动配置：根据硬件探测结果填充所有 "auto" 值
+    auto_configure(config)
+
     _gpu_semaphore = asyncio.Semaphore(config.batching.max_concurrency)
     logger.info("Server mode: %s", config.mode)
-    logger.info("Batching config: max_batch_size=%d, max_wait_ms=%d",
-                config.batching.max_batch_size, config.batching.max_wait_ms)
+    logger.info(
+        "Batching config: max_batch_size=%d, max_batch_tokens=%d, "
+        "max_concurrency=%d, backpressure_threshold=%d",
+        config.batching.max_batch_size,
+        config.batching.max_batch_tokens,
+        config.batching.max_concurrency,
+        config.batching.backpressure_threshold,
+    )
 
     # 加载 Embedding 模型
     if config.mode in ("embed", "all"):
@@ -86,16 +105,22 @@ async def lifespan(app: FastAPI):
         )
         embed_model.load()
 
-        # 初始化 batcher
-        dense_batcher = DynamicBatcher(
+        # 初始化 TokenBatcher（使用模型的 tokenizer 进行精确 token 计数）
+        dense_batcher = TokenBatcher(
             process_fn=_batch_dense,
+            tokenize_fn=embed_model.count_tokens,
+            max_batch_tokens=config.batching.max_batch_tokens,
             max_batch_size=config.batching.max_batch_size,
             max_wait_ms=config.batching.max_wait_ms,
+            backpressure_threshold=config.batching.backpressure_threshold,
         )
-        sparse_batcher = DynamicBatcher(
+        sparse_batcher = TokenBatcher(
             process_fn=_batch_sparse,
+            tokenize_fn=embed_model.count_tokens,
+            max_batch_tokens=config.batching.max_batch_tokens,
             max_batch_size=config.batching.max_batch_size,
             max_wait_ms=config.batching.max_wait_ms,
+            backpressure_threshold=config.batching.backpressure_threshold,
         )
         dense_batcher.start()
         sparse_batcher.start()
@@ -117,6 +142,9 @@ async def lifespan(app: FastAPI):
         if config.warmup.enabled:
             rerank_model.warmup()
 
+    # 注册 metrics 端点（如果 prometheus_client 可用）
+    _register_metrics(app)
+
     logger.info("All models loaded, server ready.")
     yield
 
@@ -128,10 +156,27 @@ async def lifespan(app: FastAPI):
     logger.info("Server shutdown complete.")
 
 
+def _register_metrics(app: FastAPI) -> None:
+    """尝试注册 Prometheus metrics 端点"""
+    try:
+        from app.metrics import get_metrics_response, setup_metrics
+        setup_metrics()
+
+        @app.get("/metrics")
+        async def metrics_endpoint():
+            return get_metrics_response()
+
+        logger.info("Prometheus /metrics endpoint registered")
+    except ImportError:
+        logger.info("prometheus_client not installed, /metrics endpoint disabled")
+    except Exception as e:
+        logger.warning("Failed to register /metrics endpoint: %s", e)
+
+
 app = FastAPI(
     title="Embedding & Rerank Server",
-    description="基于 FlagEmbedding 的模型推理服务，OpenAI 兼容接口",
-    version="1.0.0",
+    description="自适应推理服务：自动硬件探测、Token-level batching、优先级队列",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -143,17 +188,31 @@ app.add_middleware(
 )
 
 
+# ===== 背压异常处理 =====
+
+@app.exception_handler(BackpressureError)
+async def backpressure_handler(request: Request, exc: BackpressureError):
+    """队列过深时返回 429 + Retry-After"""
+    retry_after = max(int(exc.estimated_wait), 1)
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Server overloaded",
+            "detail": str(exc),
+            "queue_depth": exc.queue_depth,
+            "estimated_wait_seconds": exc.estimated_wait,
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 # ===== Health Check =====
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查接口
 
-    返回模型加载状态，供 aladdin 后端在启动时确认服务可用。
-    status:
-    - ready: 所有配置的模型已加载完成
-    - loading: 模型正在加载中
-    - error: 模型加载失败
+    返回模型加载状态、队列深度和预估等待时间。
     """
     models_loaded = {}
 
@@ -164,9 +223,18 @@ async def health_check():
 
     all_ready = all(models_loaded.values()) if models_loaded else False
 
+    # 队列状态
+    queue_depth = 0
+    estimated_wait = 0.0
+    if dense_batcher:
+        queue_depth = dense_batcher.queue_depth
+        estimated_wait = dense_batcher.estimated_wait_time()
+
     return HealthResponse(
         status="ready" if all_ready else "loading",
         models_loaded=models_loaded,
+        queue_depth=queue_depth,
+        estimated_wait_seconds=estimated_wait,
     )
 
 
@@ -174,7 +242,12 @@ async def health_check():
 
 @app.post("/v1/embeddings", response_model=EmbeddingResponse)
 async def create_embeddings(request: EmbeddingRequest):
-    """OpenAI 兼容的 dense embedding 接口"""
+    """OpenAI 兼容的 dense embedding 接口
+
+    优先级规则：
+    - 单条输入 → priority=0（查询场景，低延迟）
+    - 多条输入 → priority=1（入库场景，高吞吐）
+    """
     if not embed_model or not embed_model.ready:
         raise HTTPException(status_code=503, detail="Embedding model not ready")
 
@@ -184,13 +257,15 @@ async def create_embeddings(request: EmbeddingRequest):
     if not texts:
         raise HTTPException(status_code=400, detail="Input cannot be empty")
 
-    # 通过 batcher 提交（每个文本作为独立请求进入队列）
-    # 但这里一次请求可能包含多条文本，直接作为一个 batch 提交更高效
+    # 根据输入数量设置优先级
+    priority = 0 if len(texts) == 1 else 1
+
+    # 通过 TokenBatcher 提交（无超时，永不主动拒绝）
     try:
-        futures = [dense_batcher.submit(text) for text in texts]
-        embeddings = await asyncio.wait_for(asyncio.gather(*futures), timeout=config.server.request_timeout)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Embedding request timeout ({config.server.request_timeout}s)")
+        futures = [dense_batcher.submit(text, priority=priority) for text in texts]
+        embeddings = await asyncio.gather(*futures)
+    except BackpressureError:
+        raise  # 由 exception_handler 处理
 
     data = [
         EmbeddingData(embedding=emb, index=i)
@@ -219,11 +294,14 @@ async def create_sparse_embeddings(request: SparseEmbeddingRequest):
     if not texts:
         raise HTTPException(status_code=400, detail="Inputs cannot be empty")
 
+    # 根据输入数量设置优先级
+    priority = 0 if len(texts) == 1 else 1
+
     try:
-        futures = [sparse_batcher.submit(text) for text in texts]
-        sparse_vecs = await asyncio.wait_for(asyncio.gather(*futures), timeout=config.server.request_timeout)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Sparse embedding request timeout ({config.server.request_timeout}s)")
+        futures = [sparse_batcher.submit(text, priority=priority) for text in texts]
+        sparse_vecs = await asyncio.gather(*futures)
+    except BackpressureError:
+        raise
 
     return sparse_vecs
 
@@ -241,9 +319,10 @@ async def rerank_documents(request: RerankRequest):
 
     # Rerank 不走 batcher（每次请求本身就是一个完整的 query-docs 对）
     loop = asyncio.get_running_loop()
-    scores = await loop.run_in_executor(
-        None, rerank_model.compute_scores, request.query, request.documents
-    )
+    async with _gpu_semaphore:
+        scores = await loop.run_in_executor(
+            None, rerank_model.compute_scores, request.query, request.documents
+        )
 
     # 构建结果并按分数降序排列
     results = [
@@ -262,13 +341,11 @@ async def rerank_documents(request: RerankRequest):
     )
 
 
-
-
-
 if __name__ == "__main__":
     import uvicorn
 
     cfg = load_config()
+    auto_configure(cfg)
     uvicorn.run(
         "app.main:app",
         host=cfg.server.host,

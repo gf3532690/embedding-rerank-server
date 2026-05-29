@@ -2,7 +2,6 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pyyaml==6.0.2
 pydantic==2.9.2
-pydantic-settings==2.5.2
 numpy>=1.24.0
 
 # === ML 核心依赖 ===
@@ -22,3 +21,6 @@ optimum==1.22.0
 
 # FlagEmbedding（用于 sparse 向量 + pytorch 模式回退）
 FlagEmbedding==1.2.11
+
+# Prometheus 监控
+prometheus_client>=0.20.0

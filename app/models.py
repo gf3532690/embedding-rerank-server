@@ -3,6 +3,14 @@
 支持两种推理引擎：
 - pytorch: 使用 FlagEmbedding 原生推理（GPU 推荐）
 - onnx: 使用 ONNX Runtime 推理（CPU 推荐，快 2-3x）
+
+适配 TokenBatcher：
+- 去掉内部 batch_size 限制（由 batcher 控制批大小）
+- 保持 ONNX/PyTorch 双引擎
+- 提供 tokenize 方法供 batcher 估算 token 数
+
+@author hardware-adaptive-engine
+@since 2.0.0
 """
 
 import logging
@@ -31,18 +39,22 @@ class EmbedModel:
         self.engine = engine
         self._model = None  # FlagEmbedding model (for pytorch + sparse)
         self._onnx_session = None  # ONNX Runtime session (for dense)
-        self._tokenizer = None  # tokenizer (for onnx mode)
+        self._tokenizer = None  # tokenizer (for onnx mode + token counting)
         self._ready = False
 
     def load(self) -> None:
         """加载模型"""
-        logger.info("Loading embedding model from %s (engine=%s)...", self.model_path, self.engine)
+        logger.info("Loading embedding model from %s (engine=%s, device=%s)...",
+                    self.model_path, self.engine, self.device)
         start = time.time()
 
         if self.engine == "onnx":
             self._load_onnx()
         else:
             self._load_pytorch()
+
+        # 确保 tokenizer 可用（用于 token 计数）
+        self._ensure_tokenizer()
 
         elapsed = time.time() - start
         logger.info("Embedding model loaded in %.1fs", elapsed)
@@ -74,7 +86,6 @@ class EmbedModel:
 
         onnx_path = os.path.join(self.model_path, "onnx")
         if not os.path.exists(onnx_path):
-            # 如果没有 onnx 子目录，尝试直接从模型目录加载
             onnx_path = self.model_path
 
         self._tokenizer = AutoTokenizer.from_pretrained(onnx_path)
@@ -96,18 +107,62 @@ class EmbedModel:
         except Exception as e:
             logger.warning("FlagEmbedding load failed, sparse will be unavailable: %s", e)
 
+    def _ensure_tokenizer(self) -> None:
+        """确保 tokenizer 可用（用于 token 计数）"""
+        if self._tokenizer is not None:
+            return
+        try:
+            from transformers import AutoTokenizer
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            logger.info("Tokenizer loaded for token counting")
+        except Exception as e:
+            logger.warning("Failed to load tokenizer for counting, will use estimation: %s", e)
+
+    def count_tokens(self, text: str) -> int:
+        """计算文本的 token 数量
+
+        供 TokenBatcher 使用，用于按 token budget 合批。
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            token 数量
+        """
+        if not text or not text.strip():
+            return 1
+        if self._tokenizer is not None:
+            try:
+                return len(self._tokenizer.encode(text, add_special_tokens=False))
+            except Exception:
+                pass
+        # 回退：按字符估算（中文 1 字 ≈ 1.5 tokens，英文 4 chars ≈ 1 token）
+        return max(len(text) // 3, 1)
+
     @property
     def ready(self) -> bool:
         return self._ready
 
     def encode_dense(self, texts: list[str]) -> list[list[float]]:
-        """批量生成 dense embedding"""
+        """批量生成 dense embedding
+
+        由 TokenBatcher 控制批大小，此处不再内部分批。
+
+        Args:
+            texts: 文本列表（批大小由 batcher 决定）
+
+        Returns:
+            embedding 列表
+        """
         if self.engine == "onnx":
             return self._encode_dense_onnx(texts)
         return self._encode_dense_pytorch(texts)
 
     def _encode_dense_onnx(self, texts: list[str]) -> list[list[float]]:
-        """ONNX Runtime dense 推理"""
+        """ONNX Runtime dense 推理
+
+        不再内部分批 — 由 TokenBatcher 保证每批 token 总量在安全范围内。
+        """
         if not self._onnx_session or not self._tokenizer:
             raise RuntimeError("ONNX model not loaded")
 
@@ -122,38 +177,39 @@ class EmbedModel:
         if not non_empty_texts:
             return [[0.0] * 1024 for _ in texts]
 
-        # 分批推理（避免内存峰值过高）
-        batch_size = 32
-        all_embeddings = []
-        for i in range(0, len(non_empty_texts), batch_size):
-            batch = non_empty_texts[i:i + batch_size]
-            inputs = self._tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt",
-            )
-            outputs = self._onnx_session(**inputs)
-            # Mean pooling over token embeddings
-            attention_mask = inputs["attention_mask"]
-            token_embeddings = outputs.last_hidden_state
-            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-            embeddings = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-            # L2 normalize
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-            all_embeddings.extend(embeddings.detach().numpy().tolist())
+        # 直接推理整个 batch（大小由 batcher 控制）
+        inputs = self._tokenizer(
+            non_empty_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        outputs = self._onnx_session(**inputs)
+        # Mean pooling over token embeddings
+        attention_mask = inputs["attention_mask"]
+        token_embeddings = outputs.last_hidden_state
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        embeddings = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(
+            input_mask_expanded.sum(1), min=1e-9
+        )
+        # L2 normalize
+        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        all_embeddings = embeddings.detach().numpy().tolist()
 
         # 填回原始位置
         dim = len(all_embeddings[0])
-        results = [[0.0] * dim] * len(texts)
+        results = [[0.0] * dim for _ in texts]
         for i, orig_idx in enumerate(non_empty_indices):
             results[orig_idx] = all_embeddings[i]
 
         return results
 
     def _encode_dense_pytorch(self, texts: list[str]) -> list[list[float]]:
-        """PyTorch dense 推理（FlagEmbedding 原生）"""
+        """PyTorch dense 推理（FlagEmbedding 原生）
+
+        不再内部分批 — 由 TokenBatcher 保证每批 token 总量在安全范围内。
+        """
         if not self._model:
             raise RuntimeError("Model not loaded")
 
@@ -174,9 +230,10 @@ class EmbedModel:
         indexed_texts.sort(key=lambda x: len(x[1]), reverse=True)
 
         sorted_texts = [t for _, t in indexed_texts]
+        # batch_size 设为整个列表大小（由 batcher 控制外部批大小）
         output = self._model.encode(
             sorted_texts,
-            batch_size=min(len(sorted_texts), 32),
+            batch_size=len(sorted_texts),
             max_length=self.max_length,
             return_dense=True,
             return_sparse=False,
@@ -194,16 +251,22 @@ class EmbedModel:
 
         # 填回原始位置
         dim = len(sorted_results[0])
-        results = [[0.0] * dim] * len(texts)
+        results = [[0.0] * dim for _ in texts]
         for i, orig_idx in enumerate(non_empty_indices):
             results[orig_idx] = sorted_results[i]
 
         return results
 
     def encode_sparse(self, texts: list[str]) -> list[list[dict]]:
-        """批量生成 sparse embedding（始终用 FlagEmbedding PyTorch）"""
+        """批量生成 sparse embedding（始终用 FlagEmbedding PyTorch）
+
+        Args:
+            texts: 文本列表（批大小由 batcher 决定）
+
+        Returns:
+            sparse embedding 列表
+        """
         if not self._model:
-            # ONNX 模式下如果 FlagEmbedding 加载失败，返回空
             return [[] for _ in texts]
 
         # 空文本过滤
@@ -219,7 +282,7 @@ class EmbedModel:
 
         output = self._model.encode(
             non_empty_texts,
-            batch_size=min(len(non_empty_texts), 32),
+            batch_size=len(non_empty_texts),
             max_length=self.max_length,
             return_dense=False,
             return_sparse=True,
@@ -249,7 +312,7 @@ class EmbedModel:
         if not self._ready:
             return
         logger.info("Warming up embedding model with %d samples...", n_samples)
-        dummy_texts = ["预热测试文本"] * n_samples
+        dummy_texts = ["预热测试文本，用于初始化模型推理路径。"] * n_samples
         self.encode_dense(dummy_texts)
         if self._model:
             self.encode_sparse(dummy_texts)
@@ -273,7 +336,8 @@ class RerankModel:
 
     def load(self) -> None:
         """加载 rerank 模型"""
-        logger.info("Loading rerank model from %s (engine=%s)...", self.model_path, self.engine)
+        logger.info("Loading rerank model from %s (engine=%s, device=%s)...",
+                    self.model_path, self.engine, self.device)
         start = time.time()
 
         if self.engine == "onnx":
@@ -316,7 +380,10 @@ class RerankModel:
         return self._ready
 
     def compute_scores(self, query: str, documents: list[str]) -> list[float]:
-        """计算 query 与每个 document 的相关性分数"""
+        """计算 query 与每个 document 的相关性分数
+
+        不再内部分批 — rerank 本身每次请求就是一个完整的 query-docs 对。
+        """
         if self.engine == "onnx":
             return self._compute_scores_onnx(query, documents)
         return self._compute_scores_pytorch(query, documents)
@@ -341,26 +408,23 @@ class RerankModel:
             raise RuntimeError("ONNX rerank model not loaded")
 
         pairs = [[query, doc] for doc in documents]
-        scores = []
-        batch_size = 16
-        for i in range(0, len(pairs), batch_size):
-            batch = pairs[i:i + batch_size]
-            inputs = self._tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt",
-            )
-            outputs = self._onnx_session(**inputs)
-            # Cross-encoder 输出 logits，取第一列作为相关性分数
-            logits = outputs.logits
-            if logits.shape[-1] == 1:
-                batch_scores = logits.squeeze(-1).detach().numpy().tolist()
-            else:
-                batch_scores = logits[:, 0].detach().numpy().tolist()
-            scores.extend(batch_scores)
+        # 直接推理整个 batch
+        inputs = self._tokenizer(
+            pairs,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        outputs = self._onnx_session(**inputs)
+        logits = outputs.logits
+        if logits.shape[-1] == 1:
+            scores = logits.squeeze(-1).detach().numpy().tolist()
+        else:
+            scores = logits[:, 0].detach().numpy().tolist()
 
+        if isinstance(scores, float):
+            scores = [scores]
         return scores
 
     def warmup(self, n_samples: int = 4) -> None:
@@ -368,6 +432,6 @@ class RerankModel:
         if not self._ready:
             return
         logger.info("Warming up rerank model with %d samples...", n_samples)
-        dummy_docs = ["预热测试文档"] * n_samples
+        dummy_docs = ["预热测试文档，用于初始化模型推理路径。"] * n_samples
         self.compute_scores("预热测试查询", dummy_docs)
         logger.info("Rerank model warmup complete")

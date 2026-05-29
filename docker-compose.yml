@@ -1,5 +1,5 @@
-# Embedding & Rerank Server 部署配置
-# 两个独立进程，共享同一镜像，各自加载不同模型
+# Embedding & Rerank Server 部署配置（v2.0 自适应引擎）
+# 自动探测硬件，零配置启动。只需指定模式和模型路径。
 
 services:
   embedding:
@@ -8,12 +8,7 @@ services:
     environment:
       - MODE=embed
       - EMBED_MODEL_PATH=/models/bge-m3
-      - DEVICE=cuda
-      - MAX_BATCH_SIZE=64
-      - MAX_WAIT_MS=10
       - PORT=7997
-      - NVIDIA_VISIBLE_DEVICES=1
-      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "7997:7997"
     volumes:
@@ -24,7 +19,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              count: 1
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
@@ -40,10 +35,7 @@ services:
     environment:
       - MODE=rerank
       - RERANK_MODEL_PATH=/models/bge-reranker-v2-m3
-      - DEVICE=cuda
       - PORT=7998
-      - NVIDIA_VISIBLE_DEVICES=1
-      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "7998:7998"
     volumes:
@@ -54,7 +46,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              count: 1
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7998/health"]

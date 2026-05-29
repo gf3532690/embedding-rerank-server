@@ -1,6 +1,8 @@
 # ============================================================
-# Embedding & Rerank Server 配置（CPU 模式）
+# Embedding & Rerank Server 配置（CPU 模式 v2.0）
 # ============================================================
+# CPU 专用配置，覆盖部分自动探测值以获得最佳 CPU 性能。
+# 大部分参数仍可使用 "auto"。
 
 server:
   host: "0.0.0.0"
@@ -14,6 +16,7 @@ models:
     path: "/models/bge-m3"
     device: "cpu"
     fp16: false
+    # CPU 模式建议缩短 max_length 以提升吞吐
     max_length: 1024
     engine: "onnx"
 
@@ -25,10 +28,13 @@ models:
     engine: "pytorch"
 
 batching:
-  max_batch_size: 16
+  # CPU 模式下 batch 不宜过大
+  max_batch_size: "auto"
+  max_batch_tokens: "auto"
   max_wait_ms: 50
-  # CPU 模式不存在显存问题，可以并行
-  max_concurrency: 2
+  # CPU 模式可并行推理
+  max_concurrency: "auto"
+  backpressure_threshold: "auto"
 
 warmup:
   enabled: true
