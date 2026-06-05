@@ -1,4 +1,4 @@
-# Embedding & Rerank Server CPU 模式部署（v2.0 自适应引擎）
+# Embedding & Rerank Server CPU 模式部署（v2.1 自适应引擎）
 # 适用于无 GPU 的 AMD64 服务器
 # 自动探测 CPU 核数并配置最优参数
 

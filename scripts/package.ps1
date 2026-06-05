@@ -5,7 +5,7 @@
 # 特性：零配置启动，自动探测硬件
 $ErrorActionPreference = "Stop"
 
-$VERSION = "2.0.0"
+$VERSION = "2.1.0"
 $IMAGE_NAME = "embedding-rerank-server"
 $IMAGE_TAG = "latest"
 $OUT = "deploy"
@@ -53,10 +53,11 @@ $deployNote = @"
 #   2. docker compose up -d
 #   3. curl http://localhost:7997/health
 #
-# v2.0 特性:
+# 核心特性:
 #   - 零配置启动，自动探测 GPU 显存并配置最优参数
 #   - Token-level batching，按 token 数合批
 #   - 优先级队列，查询优先于入库
+#   - 向量缓存 + batch 内去重 + 动态 max_length
 #   - /metrics Prometheus 监控端点
 #   - 队列过深返回 429 (背压机制)
 #

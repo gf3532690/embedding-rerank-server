@@ -1,4 +1,4 @@
-# Embedding & Rerank Server 部署配置（v2.0 自适应引擎）
+# Embedding & Rerank Server 部署配置（v2.1 自适应引擎）
 # 自动探测硬件，零配置启动。只需指定模式和模型路径。
 
 services:

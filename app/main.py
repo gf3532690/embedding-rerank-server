@@ -24,7 +24,22 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+# uvloop: 高性能事件循环（比默认 asyncio 快 2-4x IO 吞吐）
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass  # uvloop 不可用时用默认事件循环
+
+# orjson: 高性能 JSON 序列化（比标准 json 快 3-10x）
+try:
+    from fastapi.responses import ORJSONResponse
+    _default_response_class = ORJSONResponse
+except ImportError:
+    _default_response_class = JSONResponse
+
 from app.batcher import BackpressureError, TokenBatcher
+from app.cache import EmbeddingCache
 from app.config import AppConfig, load_config
 from app.hardware import auto_configure
 from app.models import EmbedModel, RerankModel
@@ -54,6 +69,7 @@ embed_model: EmbedModel = None
 rerank_model: RerankModel = None
 dense_batcher: TokenBatcher = None
 sparse_batcher: TokenBatcher = None
+embedding_cache: EmbeddingCache = None
 # GPU 推理信号量：控制同时执行的推理任务数，避免显存叠加 OOM
 _gpu_semaphore: asyncio.Semaphore = None
 
@@ -75,13 +91,19 @@ async def _batch_sparse(texts: list[str]) -> list[list[dict]]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时加载模型，关闭时释放资源"""
-    global config, embed_model, rerank_model, dense_batcher, sparse_batcher, _gpu_semaphore
+    global config, embed_model, rerank_model, dense_batcher, sparse_batcher, embedding_cache, _gpu_semaphore
 
     # 加载配置
     config = load_config()
 
     # 自动配置：根据硬件探测结果填充所有 "auto" 值
     auto_configure(config)
+
+    # 初始化向量缓存
+    embedding_cache = EmbeddingCache(
+        enabled=config.cache.enabled,
+        max_size=config.cache.max_size,
+    )
 
     _gpu_semaphore = asyncio.Semaphore(config.batching.max_concurrency)
     logger.info("Server mode: %s", config.mode)
@@ -102,6 +124,7 @@ async def lifespan(app: FastAPI):
             fp16=config.models.embed.fp16,
             max_length=config.models.embed.max_length,
             engine=config.models.embed.engine,
+            quantization=config.models.embed.quantization,
         )
         embed_model.load()
 
@@ -113,6 +136,7 @@ async def lifespan(app: FastAPI):
             max_batch_size=config.batching.max_batch_size,
             max_wait_ms=config.batching.max_wait_ms,
             backpressure_threshold=config.batching.backpressure_threshold,
+            name="dense",
         )
         sparse_batcher = TokenBatcher(
             process_fn=_batch_sparse,
@@ -121,6 +145,7 @@ async def lifespan(app: FastAPI):
             max_batch_size=config.batching.max_batch_size,
             max_wait_ms=config.batching.max_wait_ms,
             backpressure_threshold=config.batching.backpressure_threshold,
+            name="sparse",
         )
         dense_batcher.start()
         sparse_batcher.start()
@@ -176,8 +201,9 @@ def _register_metrics(app: FastAPI) -> None:
 app = FastAPI(
     title="Embedding & Rerank Server",
     description="自适应推理服务：自动硬件探测、Token-level batching、优先级队列",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
+    default_response_class=_default_response_class,
 )
 
 app.add_middleware(
@@ -186,6 +212,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ===== 请求指标中间件 =====
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """记录每个请求的计数和延迟（接入 Prometheus）"""
+    import time as _time
+    _t0 = _time.monotonic()
+    response = await call_next(request)
+    duration = _time.monotonic() - _t0
+
+    # 只记录业务端点，跳过 /metrics 和 /health 避免噪音
+    path = request.url.path
+    if path.startswith("/v1/"):
+        try:
+            from app import metrics
+            metrics.record_request(path, response.status_code)
+            metrics.record_request_duration(path, duration)
+        except Exception:
+            pass
+
+    return response
 
 
 # ===== 背压异常处理 =====
@@ -261,9 +310,22 @@ async def create_embeddings(request: EmbeddingRequest):
     priority = 0 if len(texts) == 1 else 1
 
     # 通过 TokenBatcher 提交（无超时，永不主动拒绝）
+    # 先查缓存，只推理未命中的
     try:
-        futures = [dense_batcher.submit(text, priority=priority) for text in texts]
-        embeddings = await asyncio.gather(*futures)
+        cached_results, miss_indices = embedding_cache.get_dense_batch(texts)
+
+        if miss_indices:
+            # 只提交未命中的文本到 batcher
+            miss_texts = [texts[i] for i in miss_indices]
+            futures = [dense_batcher.submit(text, priority=priority) for text in miss_texts]
+            miss_embeddings = await asyncio.gather(*futures)
+
+            # 写入缓存并填回结果
+            for idx, emb in zip(miss_indices, miss_embeddings):
+                embedding_cache.put_dense(texts[idx], emb)
+                cached_results[idx] = emb
+
+        embeddings = cached_results
     except BackpressureError:
         raise  # 由 exception_handler 处理
 
@@ -298,8 +360,18 @@ async def create_sparse_embeddings(request: SparseEmbeddingRequest):
     priority = 0 if len(texts) == 1 else 1
 
     try:
-        futures = [sparse_batcher.submit(text, priority=priority) for text in texts]
-        sparse_vecs = await asyncio.gather(*futures)
+        cached_results, miss_indices = embedding_cache.get_sparse_batch(texts)
+
+        if miss_indices:
+            miss_texts = [texts[i] for i in miss_indices]
+            futures = [sparse_batcher.submit(text, priority=priority) for text in miss_texts]
+            miss_sparse = await asyncio.gather(*futures)
+
+            for idx, sv in zip(miss_indices, miss_sparse):
+                embedding_cache.put_sparse(texts[idx], sv)
+                cached_results[idx] = sv
+
+        sparse_vecs = cached_results
     except BackpressureError:
         raise
 

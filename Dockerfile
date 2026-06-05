@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
@@ -9,7 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python 依赖（torch 已由基础镜像提供，pip 安装时跳过）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt || \
+    (echo "flash-attn install failed, installing without it..." && \
+     grep -v "flash-attn" requirements.txt > requirements_no_flash.txt && \
+     pip install --no-cache-dir -r requirements_no_flash.txt)
 
 # 应用代码
 COPY app/ ./app/

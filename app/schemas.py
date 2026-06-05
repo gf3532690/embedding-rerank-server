@@ -85,4 +85,4 @@ class HealthResponse(BaseModel):
     models_loaded: dict[str, bool] = Field(default_factory=dict, description="各模型加载状态")
     queue_depth: int = Field(0, description="当前队列中待处理的请求数")
     estimated_wait_seconds: float = Field(0.0, description="预估等待时间（秒）")
-    version: str = "2.0.0"
+    version: str = "2.1.0"

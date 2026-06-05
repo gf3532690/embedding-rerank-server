@@ -2,7 +2,9 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pyyaml==6.0.2
 pydantic==2.9.2
-numpy>=1.24.0
+# numpy 必须锁定 <2.0：onnxruntime 1.19.2 / FlagEmbedding 1.2.11 等老栈
+# 部分 wheel 针对 numpy 1.x ABI 编译，装 numpy 2.x 会运行时崩溃
+numpy>=1.24.0,<2.0.0
 
 # === ML 核心依赖 ===
 transformers==4.44.2
@@ -12,7 +14,7 @@ peft>=0.11.0
 datasets>=2.19.0
 sentencepiece>=0.1.99
 protobuf>=3.20.0
-torch==2.5.1
+torch==2.6.0
 
 # ONNX Runtime（CPU 推理加速）
 onnx>=1.14.0
@@ -24,3 +26,7 @@ FlagEmbedding==1.2.11
 
 # Prometheus 监控
 prometheus_client>=0.20.0
+
+# 性能优化（可选）
+uvloop>=0.19.0; sys_platform != "win32"
+orjson>=3.9.0

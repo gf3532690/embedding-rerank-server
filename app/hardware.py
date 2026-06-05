@@ -130,76 +130,6 @@ def detect_hardware() -> HardwareInfo:
     return info
 
 
-def probe_max_batch_size(
-    model,
-    device: str,
-    max_length: int = 512,
-    start_batch: int = 4,
-    max_limit: int = 256,
-) -> int:
-    """通过 dummy 推理逐步增大 batch_size，探测安全上限
-
-    使用二分法快速找到不 OOM 的最大 batch_size，然后取 80% 作为安全值。
-
-    Args:
-        model: 已加载的模型实例（需要有 encode_dense 方法）
-        device: "cuda" 或 "cpu"
-        max_length: 用于 dummy 数据的文本长度
-        start_batch: 起始 batch 大小
-        max_limit: 探测上限
-
-    Returns:
-        安全的 max_batch_size
-    """
-    if device == "cpu":
-        # CPU 模式不需要探测 OOM，根据核数给一个合理值
-        cores = detect_cpu_cores()
-        return min(max(cores * 4, 16), 64)
-
-    # GPU 模式：二分法探测
-    import torch
-
-    # 生成 dummy 文本（中等长度，模拟真实场景）
-    dummy_text = "这是一段用于探测最大批量大小的测试文本。" * 10  # ~200 chars
-
-    low = start_batch
-    high = max_limit
-    safe_batch = start_batch
-
-    logger.info("Probing max batch size (device=%s)...", device)
-
-    while low <= high:
-        mid = (low + high) // 2
-        dummy_texts = [dummy_text] * mid
-
-        try:
-            # 清理 GPU 缓存
-            torch.cuda.empty_cache()
-            # 尝试推理
-            model.encode_dense(dummy_texts)
-            # 成功，记录并尝试更大
-            safe_batch = mid
-            low = mid + 1
-            logger.debug("  batch_size=%d: OK", mid)
-        except (RuntimeError, torch.cuda.OutOfMemoryError):
-            # OOM，缩小范围
-            high = mid - 1
-            logger.debug("  batch_size=%d: OOM", mid)
-            torch.cuda.empty_cache()
-        except Exception as e:
-            # 其他错误，保守处理
-            logger.warning("  batch_size=%d: unexpected error: %s", mid, e)
-            high = mid - 1
-
-    # 取 80% 作为安全值
-    safe_batch = max(int(safe_batch * 0.8), start_batch)
-    logger.info("Probed max_batch_size: %d (safe value with 80%% margin)", safe_batch)
-
-    # 清理
-    torch.cuda.empty_cache()
-    return safe_batch
-
-
 def _compute_max_batch_tokens(gpu_memory_gb: float, max_length: int) -> int:
     """根据显存估算 max_batch_tokens
 
@@ -252,6 +182,14 @@ def auto_configure(config) -> None:
         config.models.embed.fp16 = hw.device == "cuda"
     if _is_auto(config.models.rerank.fp16):
         config.models.rerank.fp16 = hw.device == "cuda"
+
+    # --- 量化自动选择 ---
+    # auto: GPU 不量化（保持精度，靠 fp16 + Flash Attention），CPU 也默认不量化
+    # （INT8 量化需要预先导出量化模型，不能凭空开启，所以 auto = none）
+    if _is_auto(config.models.embed.quantization):
+        config.models.embed.quantization = "none"
+    if _is_auto(config.models.rerank.quantization):
+        config.models.rerank.quantization = "none"
 
     # --- Batching 参数 ---
     if _is_auto(config.batching.max_batch_size):

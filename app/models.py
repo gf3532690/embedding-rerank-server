@@ -31,15 +31,18 @@ class EmbedModel:
     """
 
     def __init__(self, model_path: str, device: str = "cuda", fp16: bool = True,
-                 max_length: int = 8192, engine: str = "pytorch"):
+                 max_length: int = 8192, engine: str = "pytorch",
+                 quantization: str = "none"):
         self.model_path = model_path
         self.device = device
         self.fp16 = fp16
         self.max_length = max_length
         self.engine = engine
+        self.quantization = quantization
         self._model = None  # FlagEmbedding model (for pytorch + sparse)
         self._onnx_session = None  # ONNX Runtime session (for dense)
         self._tokenizer = None  # tokenizer (for onnx mode + token counting)
+        self._pipeline_engine = None  # 3-stage pipeline (ONNX mode)
         self._ready = False
 
     def load(self) -> None:
@@ -61,7 +64,10 @@ class EmbedModel:
         self._ready = True
 
     def _load_pytorch(self) -> None:
-        """PyTorch 模式加载（FlagEmbedding 原生）"""
+        """PyTorch 模式加载（FlagEmbedding 原生）
+
+        支持 INT8 量化（通过 bitsandbytes 或 torch 动态量化）。
+        """
         from FlagEmbedding import BGEM3FlagModel
 
         self._model = BGEM3FlagModel(
@@ -70,16 +76,75 @@ class EmbedModel:
             device=self.device,
         )
 
-        # torch.compile 优化（仅 GPU）
-        if self.device != "cpu":
+        # INT8 量化（GPU: bitsandbytes, CPU: torch 动态量化）
+        if self.quantization == "int8":
+            self._apply_quantization()
+
+        # 检测 Flash Attention 是否可用
+        self._log_flash_attention_status()
+
+        # torch.compile 优化（仅 GPU，且未量化时）
+        # max-autotune: 自动搜索最优 kernel 配置，首次慢但后续最快
+        # 编译缓存存储到 /tmp/torch_compile_cache，重启后复用
+        if self.device != "cpu" and self.quantization == "none":
             try:
-                self._model.model = torch.compile(self._model.model, mode="reduce-overhead")
-                logger.info("torch.compile applied (reduce-overhead mode)")
+                import os
+                # 启用编译缓存（避免每次重启都重新编译）
+                cache_dir = os.environ.get("TORCH_COMPILE_CACHE", "/tmp/torch_compile_cache")
+                os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", cache_dir)
+
+                self._model.model = torch.compile(
+                    self._model.model,
+                    mode="max-autotune",
+                    fullgraph=False,  # 允许 graph break（兼容性更好）
+                )
+                logger.info(
+                    "torch.compile applied (max-autotune mode, cache=%s)",
+                    cache_dir,
+                )
             except Exception as e:
                 logger.warning("torch.compile failed, using eager mode: %s", e)
 
+    def _apply_quantization(self) -> None:
+        """应用 INT8 量化
+
+        GPU: 尝试 bitsandbytes（需要安装）
+        CPU: 使用 torch 动态量化（内置，无需额外依赖）
+        """
+        if self.device == "cpu":
+            # CPU: torch 动态量化（对 Linear 层量化）
+            try:
+                self._model.model = torch.quantization.quantize_dynamic(
+                    self._model.model,
+                    {torch.nn.Linear},
+                    dtype=torch.qint8,
+                )
+                logger.info("INT8 dynamic quantization applied (CPU, torch built-in)")
+            except Exception as e:
+                logger.warning("CPU INT8 quantization failed: %s", e)
+        else:
+            # GPU: 尝试 bitsandbytes
+            try:
+                import bitsandbytes  # noqa: F401
+                # bitsandbytes 需要在模型加载时指定，这里做 post-hoc 量化
+                # 对于 FlagEmbedding，post-hoc 量化效果有限
+                # 更好的方式是在加载时用 load_in_8bit=True（需要改 FlagEmbedding 源码）
+                logger.info(
+                    "bitsandbytes detected but FlagEmbedding doesn't support load_in_8bit. "
+                    "Using FP16 instead. For INT8, use ONNX engine with quantized model."
+                )
+            except ImportError:
+                logger.info(
+                    "bitsandbytes not installed, skipping GPU INT8. "
+                    "Install with: pip install bitsandbytes"
+                )
+
     def _load_onnx(self) -> None:
-        """ONNX 模式加载（optimum + onnxruntime）"""
+        """ONNX 模式加载（optimum + onnxruntime）
+
+        包含 O3 图优化和线程精细调优。
+        支持 INT8 量化模型（查找 onnx_int8/ 目录）。
+        """
         import os
         from optimum.onnxruntime import ORTModelForFeatureExtraction
         from transformers import AutoTokenizer
@@ -88,12 +153,38 @@ class EmbedModel:
         if not os.path.exists(onnx_path):
             onnx_path = self.model_path
 
+        # INT8 量化模型优先
+        if self.quantization == "int8":
+            int8_path = os.path.join(self.model_path, "onnx_int8")
+            if os.path.exists(int8_path):
+                onnx_path = int8_path
+                logger.info("Using INT8 quantized ONNX model from %s", int8_path)
+            else:
+                logger.info(
+                    "INT8 model not found at %s, using default ONNX model",
+                    int8_path,
+                )
+
         self._tokenizer = AutoTokenizer.from_pretrained(onnx_path)
+
+        # 配置 ONNX Runtime SessionOptions（性能优化）
+        session_options = self._create_ort_session_options()
+
         self._onnx_session = ORTModelForFeatureExtraction.from_pretrained(
             onnx_path,
             provider="CPUExecutionProvider",
+            session_options=session_options,
         )
-        logger.info("ONNX model loaded from %s", onnx_path)
+        logger.info("ONNX model loaded from %s (O3 optimized)", onnx_path)
+
+        # 初始化 3 阶段 Pipeline 引擎
+        from app.pipeline import PipelinedDenseEngine
+        self._pipeline_engine = PipelinedDenseEngine(
+            tokenizer=self._tokenizer,
+            onnx_session=self._onnx_session,
+            max_length=self.max_length,
+        )
+        logger.info("3-stage pipeline engine initialized")
 
         # 同时加载 FlagEmbedding 用于 sparse（ONNX 不支持 sparse 输出）
         try:
@@ -107,6 +198,50 @@ class EmbedModel:
         except Exception as e:
             logger.warning("FlagEmbedding load failed, sparse will be unavailable: %s", e)
 
+    def _create_ort_session_options(self):
+        """创建优化的 ONNX Runtime SessionOptions
+
+        - graph_optimization_level = ORT_ENABLE_ALL (O3)
+        - intra_op_num_threads: 单次推理内部并行线程数
+        - inter_op_num_threads: 算子间并行度
+        - execution_mode: 根据场景选择串行或并行
+        """
+        import onnxruntime as ort
+        from app.hardware import detect_cpu_cores
+
+        cpu_cores = detect_cpu_cores()
+
+        sess_options = ort.SessionOptions()
+
+        # O3 最高级别图优化（算子融合、常量折叠、冗余消除）
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        # 线程配置：
+        # intra_op = 单个算子内部的并行线程数（如矩阵乘法）
+        # inter_op = 不同算子之间的并行度
+        # 经验值：intra_op 占大部分核，inter_op 给 2-4 个
+        intra_threads = max(cpu_cores - 2, 1)
+        inter_threads = min(2, cpu_cores)
+
+        sess_options.intra_op_num_threads = intra_threads
+        sess_options.inter_op_num_threads = inter_threads
+
+        # 执行模式：ORT_SEQUENTIAL 对小 batch 更快（减少线程调度开销）
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+        # 启用内存优化
+        sess_options.enable_mem_pattern = True
+        sess_options.enable_cpu_mem_arena = True
+
+        logger.info(
+            "ONNX SessionOptions: optimization=O3, intra_threads=%d, "
+            "inter_threads=%d, execution=SEQUENTIAL",
+            intra_threads,
+            inter_threads,
+        )
+
+        return sess_options
+
     def _ensure_tokenizer(self) -> None:
         """确保 tokenizer 可用（用于 token 计数）"""
         if self._tokenizer is not None:
@@ -117,6 +252,21 @@ class EmbedModel:
             logger.info("Tokenizer loaded for token counting")
         except Exception as e:
             logger.warning("Failed to load tokenizer for counting, will use estimation: %s", e)
+
+    @staticmethod
+    def _log_flash_attention_status() -> None:
+        """检测并记录 Flash Attention 状态"""
+        try:
+            import flash_attn  # noqa: F401
+            logger.info(
+                "Flash Attention %s detected — enabled for long sequence acceleration",
+                getattr(flash_attn, "__version__", "unknown"),
+            )
+        except ImportError:
+            logger.info(
+                "Flash Attention not installed — long sequences will use standard attention. "
+                "Install with: pip install flash-attn --no-build-isolation"
+            )
 
     def count_tokens(self, text: str) -> int:
         """计算文本的 token 数量
@@ -139,6 +289,34 @@ class EmbedModel:
         # 回退：按字符估算（中文 1 字 ≈ 1.5 tokens，英文 4 chars ≈ 1 token）
         return max(len(text) // 3, 1)
 
+    def _compute_actual_max_length(self, texts: list[str]) -> int:
+        """计算 batch 内实际最大 token 数，用于动态 padding
+
+        避免短文本 batch padding 到 model_max_length（如 8192）造成巨大计算浪费。
+        例如：一批全是 50 token 的短文本，padding 到 56 而非 8192，计算量差 146 倍。
+
+        Args:
+            texts: 文本列表
+
+        Returns:
+            实际应使用的 max_length（含特殊 token，对齐到 8 的倍数）
+        """
+        if self._tokenizer is None:
+            return self.max_length
+
+        max_tokens = 0
+        for text in texts:
+            try:
+                n_tokens = len(self._tokenizer.encode(text, add_special_tokens=False))
+                max_tokens = max(max_tokens, n_tokens)
+            except Exception:
+                return self.max_length
+
+        # +2 for [CLS] + [SEP]，对齐到 8 的倍数（GPU tensor core 友好）
+        actual = min(max_tokens + 2, self.max_length)
+        actual = ((actual + 7) // 8) * 8
+        return min(actual, self.max_length)
+
     @property
     def ready(self) -> bool:
         return self._ready
@@ -159,10 +337,15 @@ class EmbedModel:
         return self._encode_dense_pytorch(texts)
 
     def _encode_dense_onnx(self, texts: list[str]) -> list[list[float]]:
-        """ONNX Runtime dense 推理
+        """ONNX Runtime dense 推理 — 使用 3 阶段 Pipeline 引擎
 
-        不再内部分批 — 由 TokenBatcher 保证每批 token 总量在安全范围内。
+        Pipeline 引擎内部处理：tokenize → forward → postprocess
+        包含动态 max_length 优化。
         """
+        if self._pipeline_engine:
+            return self._pipeline_engine.encode_batch(texts)
+
+        # Fallback: 无 pipeline 时直接推理
         if not self._onnx_session or not self._tokenizer:
             raise RuntimeError("ONNX model not loaded")
 
@@ -177,12 +360,16 @@ class EmbedModel:
         if not non_empty_texts:
             return [[0.0] * 1024 for _ in texts]
 
+        # 动态 max_length：计算 batch 内实际最大 token 数，padding 到该值
+        # 避免短文本 batch padding 到 model_max_length 造成巨大浪费
+        actual_max_length = self._compute_actual_max_length(non_empty_texts)
+
         # 直接推理整个 batch（大小由 batcher 控制）
         inputs = self._tokenizer(
             non_empty_texts,
             padding=True,
             truncation=True,
-            max_length=self.max_length,
+            max_length=actual_max_length,
             return_tensors="pt",
         )
         outputs = self._onnx_session(**inputs)
@@ -231,10 +418,12 @@ class EmbedModel:
 
         sorted_texts = [t for _, t in indexed_texts]
         # batch_size 设为整个列表大小（由 batcher 控制外部批大小）
+        # 动态 max_length：使用 batch 内实际最大长度
+        actual_max_length = self._compute_actual_max_length(sorted_texts)
         output = self._model.encode(
             sorted_texts,
             batch_size=len(sorted_texts),
-            max_length=self.max_length,
+            max_length=actual_max_length,
             return_dense=True,
             return_sparse=False,
             return_colbert_vecs=False,
@@ -359,21 +548,35 @@ class RerankModel:
         )
 
     def _load_onnx(self) -> None:
-        """ONNX 模式"""
+        """ONNX 模式（含 O3 图优化）"""
         import os
+        import onnxruntime as ort
         from optimum.onnxruntime import ORTModelForSequenceClassification
         from transformers import AutoTokenizer
+        from app.hardware import detect_cpu_cores
 
         onnx_path = os.path.join(self.model_path, "onnx")
         if not os.path.exists(onnx_path):
             onnx_path = self.model_path
 
         self._tokenizer = AutoTokenizer.from_pretrained(onnx_path)
+
+        # SessionOptions 优化
+        cpu_cores = detect_cpu_cores()
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = max(cpu_cores - 2, 1)
+        sess_options.inter_op_num_threads = min(2, cpu_cores)
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        sess_options.enable_mem_pattern = True
+        sess_options.enable_cpu_mem_arena = True
+
         self._onnx_session = ORTModelForSequenceClassification.from_pretrained(
             onnx_path,
             provider="CPUExecutionProvider",
+            session_options=sess_options,
         )
-        logger.info("ONNX rerank model loaded from %s", onnx_path)
+        logger.info("ONNX rerank model loaded from %s (O3 optimized)", onnx_path)
 
     @property
     def ready(self) -> bool:

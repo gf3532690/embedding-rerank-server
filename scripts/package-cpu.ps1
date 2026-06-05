@@ -5,7 +5,7 @@
 # 支持 AMD64 和 ARM64 平台
 $ErrorActionPreference = "Stop"
 
-$VERSION = "2.0.0"
+$VERSION = "2.1.0"
 $IMAGE_NAME = "embedding-rerank-server"
 $IMAGE_TAG = "cpu"
 $OUT = "deploy-cpu"
@@ -43,7 +43,7 @@ Write-Host "  导出完成" -ForegroundColor Green
 Write-Host "[3/4] 复制部署文件..." -ForegroundColor Cyan
 Copy-Item docker-compose-cpu.yml "$OUT\docker-compose.yml"
 Copy-Item config.yaml "$OUT\config.yaml"
-Write-Host "  config-cpu.yaml (CPU 优化配置)" -ForegroundColor Gray
+Write-Host "  config.yaml (自适应配置，CPU/GPU 通用)" -ForegroundColor Gray
 Write-Host "  docker-compose.yml (零配置)" -ForegroundColor Gray
 
 # [4] 生成部署说明
@@ -58,17 +58,18 @@ $deployNote = @"
 #   2. docker compose up -d
 #   3. curl http://localhost:7997/health
 #
-# v2.0 特性:
+# 核心特性:
 #   - 自动探测 CPU 核数，配置最优线程数和并发
 #   - Token-level batching，按 token 数合批
-#   - ONNX Runtime 推理加速
+#   - ONNX Runtime O3 优化 + 纯 numpy 后处理
+#   - 向量缓存 + batch 内去重 + 动态 max_length
 #   - /metrics Prometheus 监控端点
 #   - 队列过深返回 429 (背压机制)
 #
 # CPU 模式注意事项:
 #   - 确保模型目录有 onnx/ 子目录
 #   - OMP_NUM_THREADS 自动设置，无需手动配置
-#   - 如需覆盖参数，编辑 config-cpu.yaml
+#   - 如需覆盖参数，编辑 config.yaml
 "@
 $deployNote | Out-File -Encoding utf8 "$OUT\README.txt"
 

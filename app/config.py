@@ -39,6 +39,7 @@ class EmbedModelConfig(BaseModel):
     - device: auto → 自动探测 cuda/cpu
     - engine: auto → cuda 用 pytorch，cpu 用 onnx
     - fp16: auto → cuda 开启，cpu 关闭
+    - quantization: none/int8/auto
     """
     path: str = "/models/bge-m3"
     # 设备：cuda / cpu / auto
@@ -49,6 +50,8 @@ class EmbedModelConfig(BaseModel):
     max_length: int = 8192
     # 推理引擎：pytorch / onnx / auto
     engine: AutoStr = "auto"
+    # 量化：none / int8 / auto（auto = GPU 不量化，CPU 尝试 int8）
+    quantization: AutoStr = "none"
 
 
 class RerankModelConfig(BaseModel):
@@ -58,6 +61,7 @@ class RerankModelConfig(BaseModel):
     fp16: AutoBool = "auto"
     max_length: int = 512
     engine: AutoStr = "auto"
+    quantization: AutoStr = "none"
 
 
 class ModelsConfig(BaseModel):
@@ -88,6 +92,14 @@ class BatchingConfig(BaseModel):
     backpressure_threshold: AutoInt = "auto"
 
 
+class CacheConfig(BaseModel):
+    """向量缓存配置"""
+    # 是否启用缓存
+    enabled: bool = True
+    # 每种类型（dense/sparse）的最大缓存条数
+    max_size: int = 100_000
+
+
 class WarmupConfig(BaseModel):
     """预热配置"""
     enabled: bool = True
@@ -100,6 +112,7 @@ class AppConfig(BaseModel):
     mode: str = "all"
     models: ModelsConfig = ModelsConfig()
     batching: BatchingConfig = BatchingConfig()
+    cache: CacheConfig = CacheConfig()
     warmup: WarmupConfig = WarmupConfig()
 
 

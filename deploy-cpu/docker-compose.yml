@@ -1,5 +1,6 @@
-# Embedding & Rerank Server CPU 模式部署
+# Embedding & Rerank Server CPU 模式部署（v2.0 自适应引擎）
 # 适用于无 GPU 的 AMD64 服务器
+# 自动探测 CPU 核数并配置最优参数
 
 services:
   embedding:
@@ -8,15 +9,12 @@ services:
     environment:
       - MODE=embed
       - EMBED_MODEL_PATH=/models/bge-m3
-      - DEVICE=cpu
-      - MAX_BATCH_SIZE=16
-      - MAX_WAIT_MS=50
       - PORT=7997
     ports:
       - "7997:7997"
     volumes:
       - ${MODEL_DIR:-./models}:/models:ro
-      - ./config-cpu.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
       interval: 15s
@@ -31,13 +29,12 @@ services:
     environment:
       - MODE=rerank
       - RERANK_MODEL_PATH=/models/bge-reranker-v2-m3
-      - DEVICE=cpu
       - PORT=7998
     ports:
       - "7998:7998"
     volumes:
       - ${MODEL_DIR:-./models}:/models:ro
-      - ./config-cpu.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7998/health"]
       interval: 15s
